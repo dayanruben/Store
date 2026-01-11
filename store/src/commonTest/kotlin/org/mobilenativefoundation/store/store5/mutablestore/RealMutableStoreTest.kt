@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import org.mobilenativefoundation.store.core5.ExperimentalStoreApi
 import org.mobilenativefoundation.store.store5.FetcherResult
+import org.mobilenativefoundation.store.store5.SourceOfTruth
 import org.mobilenativefoundation.store.store5.StoreReadRequest
 import org.mobilenativefoundation.store.store5.StoreReadResponse
 import org.mobilenativefoundation.store.store5.StoreWriteRequest
@@ -295,6 +296,115 @@ class RealMutableStoreTest {
             assertIs<StoreWriteResponse.Error.Exception>(response)
             assertEquals("contentException", delegateStore.latestOrNull("exceptionKey")?.content)
             assertNotNull(testBookkeeper.getLastFailedSync("exceptionKey"))
+        }
+
+    @Test
+    fun write_givenSourceOfTruthFailure_whenCalled_thenSurfacesWriteError() =
+        runTest {
+            // Given
+            val key = "key"
+            val errorMessage = "write error"
+            testSourceOfTruth.throwOnWrite(key) {
+                IllegalStateException(errorMessage)
+            }
+            val request =
+                StoreWriteRequest.of<String, Note, Unit>(
+                    key = key,
+                    value = Note(key, "content"),
+                    created = 3333L,
+                    onCompletions = null,
+                )
+
+            // When
+            val response = mutableStore.write(request)
+
+            // Then
+            val errorResponse = assertIs<StoreWriteResponse.Error.Exception>(response)
+            val writeException = assertIs<SourceOfTruth.WriteException>(errorResponse.error)
+            val cause = assertIs<IllegalStateException>(writeException.cause)
+            assertEquals(errorMessage, cause.message)
+        }
+
+    @Test
+    fun write_givenSourceOfTruthFailure_whenCalled_thenNetworkSyncNotAttempted() =
+        runTest {
+            // Given
+            val key = "key"
+            testUpdater.postCallCount = 0
+            testSourceOfTruth.throwOnWrite(key) { IllegalStateException("SOT failure") }
+
+            val request =
+                StoreWriteRequest.of<String, Note, Unit>(
+                    key = key,
+                    value = Note(key, "content"),
+                    created = 4444L,
+                    onCompletions = null,
+                )
+
+            // When
+            val response = mutableStore.write(request)
+
+            // Then
+            assertIs<StoreWriteResponse.Error.Exception>(response)
+            assertEquals(0, testUpdater.postCallCount, "Network updater should not be called when SOT write fails")
+        }
+
+    @Test
+    fun write_givenSourceOfTruthFailure_whenCalled_thenMemCacheNotUpdated() =
+        runTest {
+            // Given
+            val key = "key"
+            testSourceOfTruth.throwOnWrite(key) { IllegalStateException("SOT failure") }
+
+            val request =
+                StoreWriteRequest.of<String, Note, Unit>(
+                    key = key,
+                    value = Note(key, "content"),
+                    created = 6666L,
+                    onCompletions = null,
+                )
+
+            // When
+            val response = mutableStore.write(request)
+
+            // Then
+            assertIs<StoreWriteResponse.Error.Exception>(response)
+            assertNull(delegateStore.latestOrNull(key), "Value should not be in cache after SOT write failure")
+        }
+
+    @Test
+    fun write_givenNoSourceOfTruth_whenCalled_thenSucceeds() =
+        runTest {
+            // Given
+            val storeWithoutSot =
+                testStore(
+                    fetcher = testFetcher,
+                    sourceOfTruth = null,
+                    converter = testConverter,
+                    validator = testValidator,
+                    memoryCache = testCache,
+                )
+            val mutableStoreWithoutSot =
+                RealMutableStore(
+                    delegate = storeWithoutSot,
+                    updater = testUpdater,
+                    bookkeeper = testBookkeeper,
+                    logger = testLogger,
+                )
+
+            val request =
+                StoreWriteRequest.of<String, Note, Unit>(
+                    key = "noSotKey",
+                    value = Note("id", "content"),
+                    created = 5555L,
+                    onCompletions = null,
+                )
+
+            // When
+            val response = mutableStoreWithoutSot.write(request)
+
+            // Then
+            assertIs<StoreWriteResponse.Success>(response)
         }
 
     @Test
