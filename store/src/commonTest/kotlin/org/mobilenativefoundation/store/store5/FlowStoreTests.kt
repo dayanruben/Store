@@ -43,6 +43,7 @@ import org.mobilenativefoundation.store.store5.util.asSourceOfTruth
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 
 @FlowPreview
 @ExperimentalCoroutinesApi
@@ -1094,4 +1095,247 @@ class FlowStoreTests {
         )
 
     private fun <Key : Any, Output : Any> StoreBuilder<Key, Output>.buildWithTestScope() = scope(testScope).build()
+
+    @Test
+    fun stream_givenConverterThrows_thenEmitsError() =
+        testScope.runTest {
+            // Given
+            val exception = IllegalStateException("Converter failed")
+            val persister = InMemoryPersister<Int, String>()
+
+            val pipeline =
+                StoreBuilder.from(
+                    fetcher = Fetcher.of { _: Int -> "network" },
+                    sourceOfTruth = persister.asSourceOfTruth(),
+                    converter =
+                        object : Converter<String, String, String> {
+                            override fun fromNetworkToLocal(network: String): String {
+                                throw exception
+                            }
+
+                            override fun fromOutputToLocal(output: String): String = output
+                        },
+                ).buildWithTestScope()
+
+            // When + Then
+            pipeline.stream(StoreReadRequest.fresh(1)).test {
+                assertEquals(
+                    Loading(
+                        origin = StoreReadResponseOrigin.Fetcher(),
+                    ),
+                    awaitItem(),
+                )
+
+                val errorResponse = awaitItem()
+                assertIs<StoreReadResponse.Error.Exception>(errorResponse)
+                assertEquals(exception.message, errorResponse.error.message)
+            }
+        }
+
+    @Test
+    fun stream_givenNamedFetcherAndConverterThrows_thenErrorContainsFetcherName() =
+        testScope.runTest {
+            // Given
+            val fetcherName = "TestFetcher"
+            val exception = IllegalStateException("Converter failed")
+            val persister = InMemoryPersister<Int, String>()
+
+            val pipeline =
+                StoreBuilder.from(
+                    fetcher = Fetcher.of(name = fetcherName) { _: Int -> "network" },
+                    sourceOfTruth = persister.asSourceOfTruth(),
+                    converter =
+                        object : Converter<String, String, String> {
+                            override fun fromNetworkToLocal(network: String): String {
+                                throw exception
+                            }
+
+                            override fun fromOutputToLocal(output: String): String = output
+                        },
+                ).buildWithTestScope()
+
+            // When + Then
+            pipeline.stream(StoreReadRequest.fresh(1)).test {
+                assertEquals(
+                    Loading(
+                        origin = StoreReadResponseOrigin.Fetcher(),
+                    ),
+                    awaitItem(),
+                )
+
+                val errorResponse = awaitItem()
+                assertIs<StoreReadResponse.Error.Exception>(errorResponse)
+                val origin = errorResponse.origin
+                assertIs<StoreReadResponseOrigin.Fetcher>(origin)
+                assertEquals(fetcherName, origin.name)
+            }
+        }
+
+    @Test
+    fun stream_givenConverterThrowsWithFreshRequest_thenFlowCompletes() =
+        testScope.runTest {
+            // Given: fresh() request skips disk cache and fallBackToSourceOfTruth defaults to false
+            val exception = IllegalStateException("Converter failed")
+            val persister = InMemoryPersister<Int, String>()
+
+            val pipeline =
+                StoreBuilder.from(
+                    fetcher = Fetcher.of { _: Int -> "network" },
+                    sourceOfTruth = persister.asSourceOfTruth(),
+                    converter =
+                        object : Converter<String, String, String> {
+                            override fun fromNetworkToLocal(network: String): String {
+                                throw exception
+                            }
+
+                            override fun fromOutputToLocal(output: String): String = output
+                        },
+                ).buildWithTestScope()
+
+            // When + Then: Flow should complete, not hang indefinitely
+            pipeline.stream(StoreReadRequest.fresh(1)).test {
+                assertEquals(
+                    Loading(
+                        origin = StoreReadResponseOrigin.Fetcher(),
+                    ),
+                    awaitItem(),
+                )
+
+                val errorResponse = awaitItem()
+                assertIs<StoreReadResponse.Error.Exception>(errorResponse)
+                assertEquals(exception.message, errorResponse.error.message)
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
+
+    @Test
+    fun stream_givenConverterThrowsWithFallbackDisabled_thenDiskDataNotEmitted() =
+        testScope.runTest {
+            // Given: Pre-populate disk with data, then request fresh with fallBackToSourceOfTruth=false
+            val exception = IllegalStateException("Converter failed")
+            val persister = InMemoryPersister<Int, String>()
+            persister.write(1, "cached value")
+
+            val pipeline =
+                StoreBuilder.from(
+                    fetcher = Fetcher.of { _: Int -> "network" },
+                    sourceOfTruth = persister.asSourceOfTruth(),
+                    converter =
+                        object : Converter<String, String, String> {
+                            override fun fromNetworkToLocal(network: String): String {
+                                throw exception
+                            }
+
+                            override fun fromOutputToLocal(output: String): String = output
+                        },
+                ).buildWithTestScope()
+
+            // When: Request with fallBackToSourceOfTruth=false
+            pipeline.stream(StoreReadRequest.fresh(1, fallBackToSourceOfTruth = false)).test {
+                assertEquals(
+                    Loading(origin = StoreReadResponseOrigin.Fetcher()),
+                    awaitItem(),
+                )
+
+                // Then: Only error is emitted, no disk data (since fallback is disabled)
+                val errorResponse = awaitItem()
+                assertIs<StoreReadResponse.Error.Exception>(errorResponse)
+                assertEquals(exception.message, errorResponse.error.message)
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
+
+    @Test
+    fun stream_givenConverterThrowsWithFallbackEnabled_thenDiskDataEmitted() =
+        testScope.runTest {
+            // Given: Pre-populate disk with data, then request with fallBackToSourceOfTruth=true
+            val exception = IllegalStateException("Converter failed")
+            val persister = InMemoryPersister<Int, String>()
+            persister.write(1, "cached value")
+
+            val pipeline =
+                StoreBuilder.from(
+                    fetcher = Fetcher.of { _: Int -> "network" },
+                    sourceOfTruth = persister.asSourceOfTruth(),
+                    converter =
+                        object : Converter<String, String, String> {
+                            override fun fromNetworkToLocal(network: String): String {
+                                throw exception
+                            }
+
+                            override fun fromOutputToLocal(output: String): String = output
+                        },
+                ).buildWithTestScope()
+
+            // When: Request with fallBackToSourceOfTruth=true
+            pipeline.stream(StoreReadRequest.fresh(1, fallBackToSourceOfTruth = true)).test {
+                assertEquals(
+                    Loading(origin = StoreReadResponseOrigin.Fetcher()),
+                    awaitItem(),
+                )
+
+                // Then: Error is emitted
+                val errorResponse = awaitItem()
+                assertIs<StoreReadResponse.Error.Exception>(errorResponse)
+
+                // And: Disk data is also emitted (since fallback is enabled)
+                val diskData = awaitItem()
+                assertIs<StoreReadResponse.Data<String>>(diskData)
+                assertEquals("cached value", diskData.value)
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
+
+    @Test
+    fun stream_givenConverterFailsThenSucceeds_thenSecondRequestEmitsData() =
+        testScope.runTest {
+            // Given: Converter that fails on first attempt and succeeds on second
+            var attempts = 0
+            val exception = IllegalStateException("Converter failed")
+            val persister = InMemoryPersister<Int, String>()
+
+            val pipeline =
+                StoreBuilder.from(
+                    fetcher = Fetcher.of { _: Int -> "network value" },
+                    sourceOfTruth = persister.asSourceOfTruth(),
+                    converter =
+                        object : Converter<String, String, String> {
+                            override fun fromNetworkToLocal(network: String): String {
+                                attempts++
+                                if (attempts == 1) {
+                                    throw exception
+                                }
+                                return network
+                            }
+
+                            override fun fromOutputToLocal(output: String): String = output
+                        },
+                ).buildWithTestScope()
+
+            // First request: fresh with fallback disabled (should error)
+            pipeline.stream(StoreReadRequest.fresh(1, fallBackToSourceOfTruth = false)).test {
+                assertEquals(
+                    Loading(origin = StoreReadResponseOrigin.Fetcher()),
+                    awaitItem(),
+                )
+                val errorResponse = awaitItem()
+                assertIs<StoreReadResponse.Error.Exception>(errorResponse)
+                assertEquals(exception.message, errorResponse.error.message)
+                cancelAndIgnoreRemainingEvents()
+            }
+
+            // Second request: fresh again (should succeed and emit data)
+            pipeline.stream(StoreReadRequest.fresh(1, fallBackToSourceOfTruth = false)).test {
+                assertEquals(
+                    Loading(origin = StoreReadResponseOrigin.Fetcher()),
+                    awaitItem(),
+                )
+
+                // Should receive data (Fetcher origin from SOT), not be skipped
+                val dataResponse = awaitItem()
+                assertIs<StoreReadResponse.Data<String>>(dataResponse)
+                assertEquals("network value", dataResponse.value)
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
 }

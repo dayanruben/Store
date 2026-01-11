@@ -223,6 +223,8 @@ internal class RealStore<Key : Any, Network : Any, Output : Any, Local : Any>(
             }
 
         val requestKeyToFetcherName: MutableMap<Key, String?> = mutableMapOf()
+        // Track if network errored AND this is a fresh request where fallback behavior matters
+        var networkErrorWithNoFallback = false
         // we use a merge implementation that gives the source of the flow so that we can decide
         // based on that.
         return networkFlow.merge(diskFlow).transform {
@@ -233,13 +235,21 @@ internal class RealStore<Key : Any, Network : Any, Output : Any, Local : Any>(
                     val responseOrigin = it.value.origin as StoreReadResponseOrigin.Fetcher
                     requestKeyToFetcherName[request.key] = responseOrigin.name
 
-                    val fallBackToSourceOfTruth =
-                        it.value is StoreReadResponse.Error && request.fallBackToSourceOfTruth
+                    // Track if network errored and fallback to disk is disabled for fresh requests
+                    if (it.value is StoreReadResponse.Error && skipDiskCache && !request.fallBackToSourceOfTruth) {
+                        networkErrorWithNoFallback = true
+                    } else if (it.value is StoreReadResponse.Data || it.value is StoreReadResponse.NoNewData) {
+                        // Reset on success so subsequent SOT emissions aren't incorrectly filtered
+                        networkErrorWithNoFallback = false
+                    }
 
-                    if (it.value is StoreReadResponse.Data || it.value is StoreReadResponse.NoNewData || fallBackToSourceOfTruth) {
-                        // Unlocking disk only if network sent data or reported no new data
+                    if (it.value is StoreReadResponse.Data ||
+                        it.value is StoreReadResponse.NoNewData ||
+                        it.value is StoreReadResponse.Error
+                    ) {
+                        // Unlocking disk only if network sent data, reported no new data, or returned an error
                         // so that fresh data request never receives new fetcher data after
-                        // cached disk data.
+                        // cached disk data, and so that the flow can properly complete on errors.
                         // This means that if the user asked for fresh data but the network returned
                         // no new data we will still unblock disk.
                         diskLock.complete(Unit)
@@ -254,6 +264,12 @@ internal class RealStore<Key : Any, Network : Any, Output : Any, Local : Any>(
                     // right, that is data from disk
                     when (val diskData = it.value) {
                         is StoreReadResponse.Data -> {
+                            // Skip disk data (SOT origin) if this was a fresh request that errored with fallback disabled.
+                            // But always emit fresh network data (Fetcher origin) even after prior errors.
+                            if (networkErrorWithNoFallback && diskData.origin !is StoreReadResponseOrigin.Fetcher) {
+                                return@transform
+                            }
+
                             val responseOriginWithFetcherName =
                                 diskData.origin.let { origin ->
                                     if (origin is StoreReadResponseOrigin.Fetcher) {
