@@ -1,63 +1,39 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+
 plugins {
+    alias(libs.plugins.android.kotlin.multiplatform) apply false
+    alias(libs.plugins.android.library) apply false
+    alias(libs.plugins.kotlin.multiplatform) apply false
+    alias(libs.plugins.kotlin.serialization) apply false
+    alias(libs.plugins.dokka) apply false
+    alias(libs.plugins.vanniktech.maven.publish) apply false
+    alias(libs.plugins.atomicfu) apply false
+    alias(libs.plugins.kotlin.cocoapods) apply false
     alias(libs.plugins.ktlint)
-    id("com.diffplug.spotless") version "6.4.1"
-}
-
-buildscript {
-    repositories {
-        mavenCentral()
-        gradlePluginPortal()
-        google()
-    }
-
-    dependencies {
-        classpath(libs.android.gradle.plugin)
-        classpath(libs.kotlin.gradle.plugin)
-        classpath(libs.kotlin.serialization.plugin)
-        classpath(libs.dokka.gradle.plugin)
-        classpath(libs.ktlint.gradle.plugin)
-        classpath(libs.jacoco.gradle.plugin)
-        classpath(libs.maven.publish.plugin)
-        classpath(libs.atomic.fu.gradle.plugin)
-        classpath(libs.kmmBridge.gradle.plugin)
-        classpath(libs.binary.compatibility.validator)
-    }
-}
-
-allprojects {
-    repositories {
-        mavenCentral()
-        google()
-    }
-}
-
-subprojects {
-    apply(plugin = "org.jlleitschuh.gradle.ktlint")
-    apply(plugin = "com.diffplug.spotless")
-
-    ktlint {
-        disabledRules.add("import-ordering")
-    }
-
-    spotless {
-        kotlin {
-            target("src/**/*.kt")
-        }
-    }
+    alias(libs.plugins.spotless)
+    alias(libs.plugins.binary.compatibility.validator) apply false
+    alias(libs.plugins.kmmbridge.github) apply false
 }
 
 tasks {
-    withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
-        kotlinOptions {
-            jvmTarget = "11"
+    withType<KotlinCompile> {
+        compilerOptions {
+            jvmTarget = JvmTarget.fromTarget(libs.versions.jvmCompat.get())
         }
     }
 
     withType<JavaCompile>().configureEach {
-        sourceCompatibility = JavaVersion.VERSION_11.name
-        targetCompatibility = JavaVersion.VERSION_11.name
+        sourceCompatibility = libs.versions.jvmCompat.get()
+        targetCompatibility = libs.versions.jvmCompat.get()
     }
 }
 
 // Workaround for https://youtrack.jetbrains.com/issue/KT-62040
 tasks.getByName("wrapper")
+
+tasks.named<UpdateDaemonJvm>("updateDaemonJvm") {
+    // JDK 17 is the minimum version supported by the org.gradle.toolchains.foojay-resolver-convention plugin
+    languageVersion = JavaLanguageVersion.of(17)
+    vendor.set(JvmVendorSpec.AZUL)
+}
